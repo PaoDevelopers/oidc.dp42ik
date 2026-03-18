@@ -1,0 +1,149 @@
+
+                                 oidc.dp42ik
+                        OpenID Connect to dp42ik portal
+
+
+Design
+======
+
+We aim to build a redirect-based, JavaScript-less single sign-on system for
+internal YK Pao School Web services. The portal authenticates the user by it
+sown means (such as being an OIDC client), then uses a short-lived encrypted
+ticket for the target service. The service consumes the ticket and creates a
+local session.
+
+We assume that there is one central auth server (i.e., oidc.dp42ik) and two or
+more internal services; that all traffic is over HTTPS; that all services and
+the portal are controlled in coordination; and that services trust the portal
+to provide correct identity information.
+
+Each service has one key and one auth consume path only, all statically
+configured on oidc.dp42ik.
+
+oidc.dp42ik authenticates users and issues service tickets. Each service
+shares a 256-bit symmetric key with authsrv. The browser is just a transport.
+
+Cryptographic primitives
+------------------------
+
+AEAD: XChaCha20-Poly1305
+KDF:  HKDF-HMAC-SHA-256
+
+Ticket plain text format
+------------------------
+
+version[1]      = 1
+type[8]         = "web1 Ts"
+suid[64]        service ID
+cuid[64]        user ID
+issued_at[8]    unix seconds
+expires_at[8]   unix seconds, = issued_at + 60
+ticket_id[16]   random, just for log correlation
+authctx[64]     e.g. "OIDC"
+
+Pad with zeros.
+
+Encryption
+----------
+
+ciphertext || tag = XChaCha20-Poly1305 Seal (
+	key       = key for that particular service,
+	nonce     = 24-byte crypto/rand,
+	plaintext = as specified above,
+	aad       = "web1" || service_id,
+)
+
+Wire format
+-----------
+
+key_id[1] || nonce[24] || ciphertext+tag[255]
+
+Portal
+------
+
+The portal's only job is to authenticate the user and issue a ticket. It does
+not need to maintain long-lived sessions in any sense, unless the
+authentication flow itself needs multiple round-trips; oidc.dp42ik does not
+need such.
+
+Service registry at portal
+--------------------------
+
+service_id   = "cca"
+origin       = "https://paospace.ykpaoschool.cn:8192"
+consume_path = "/dp42ik"
+key_id       = 0
+ticket_key   = 32 random bytes
+ticket_ttl   = 60
+display_name = "CCA Selection Service"
+
+Login flow
+----------
+
+At the portal webroot, /login?svc=cca, the user authenticates. The portal
+issues a ticket and returns a hand-off page like this:
+
+	HTTP/1.1 200 OK
+	Content-Type: text/html; charset=utf-8
+	Cache-Control: no-store
+	Pragma: no-cache
+	Referrer-Policy: no-referrer
+	Content-Security-Policy: default-src 'none'; form-action https://paospace.ykpaoschool.cn:8192; frame-ancestors 'none'; base-uri 'none'
+	
+	<!doctype html>
+	<meta charset="utf-8" />
+	<title>Continue from oidc.dp42ik</title>
+	<h1>Continue to CCA Selection Service</h1>
+	<form method="POST" action="https://paospace.ykpaoschool.cn:8192/dp42ik">
+		<input type="hidden" name="ticket" value="BASE64_TICKET">
+		<button type="submit" autofocus>Continue</button>
+	</form>
+
+The user chooses to make the browser perform the POST; then the service sets
+its own cookies, etc., and redirects the user to its home page. The local
+service should use an opaque random session ID or a self-contained HMAC cookie
+or such, and may choose to record user_id/auth_time/auth_context/etc.
+
+Frequently aired quandaries
+===========================
+
+On whether this is actually related to dp9ik
+--------------------------------------------
+
+Okay, it's really far of a stretch from dp9ik. That was mostly a lie; we don't
+have a Kn / ticket key, so we basically miss out on the entire point of the
+dp9ik ticket exchange.
+
+In dp9ik, both the client and the server receives copies of the ticket
+encrypted under their respective long-term keys. Each decrypts their copy to
+learn Kn, then use it to encrypt authenticators to each other, proving that
+they each possess the ticket, without re-exposing their long-term keys. Kn
+is also the basis for the session secret used for subsequent communication.
+
+None of this applies to use. The browser is not a cryptographic participant in
+our protocol (sure, it uses HTTPS, but that's irrelevant). The service decrypts
+the ticket, creates a session, and the browser proves session ownership via
+whatever means the actual web service wants, probably the session cookie,
+rather than the possession of Kn, since there's literally no way to store that
+properly without JS or fragile cross-site cookies. Well, Kn could be
+theoretically used to seed the service session or somehow bind various later
+actions to the ticket exchange, but it's vestigial for our SSO purposes.
+
+XChaCha20 vs ChaCha20 here
+--------------------------
+
+The dp9ik design uses a counter as the IV (type | seq). I don't entirely buy
+that because it's difficult to reliably persist the counter increments when the
+portal crashes or anything, and you're prone to use nonces with the same key
+which would be catastrophic. I think it's much more reasonable for our purposes
+to just use a 192-bit random nonce with XChaCha20-Poly1305.
+
+Lack of replay caches
+---------------------
+
+The realistic attack path for replaying a ticket requires either breaking TLS,
+compromising the browser (which would be the user's fault), or compromising the
+endpoint that receives the POST. If none of those has happened, a replay cache
+doesn't help in any meaningful sense.
+
+
