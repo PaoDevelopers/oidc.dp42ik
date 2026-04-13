@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -62,6 +63,7 @@ func buildAuthorizationURL(serviceID string) string {
 	v.Set("response_mode", "form_post")
 	v.Set("scope", "openid email")
 	v.Set("prompt", "login")
+	v.Set("nonce", rand.Text())
 	v.Set("svc", serviceID)
 
 	return oidcAuthEndpoint + "?" + v.Encode()
